@@ -1,0 +1,54 @@
+# Dossier de résultats
+results/
+*.json
+*.csv
+
+# Fichiers de test
+test_*.json
+test_*.csv
+scraped_*.json
+scraped_*.csv
+exemple_*.json
+exemple_*.csv
+donnees_*.json
+donnees_*.csv
+links.json
+links.csv
+product.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+

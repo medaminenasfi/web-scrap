@@ -19,15 +19,12 @@ Ce guide complet vous explique :
    pip install -r requirements.txt
    ```
 
-2. **Tester le scraper** :
+2. **Lancer le scraper universel** :
    ```bash
-   python test_scraper.py
+   python universal_scraper.py https://example.com
    ```
 
-3. **Utiliser le scraper** :
-   ```bash
-   python scraper.py
-   ```
+Le script détecte automatiquement le type de page (statique ou JavaScript) et sauvegarde les résultats dans un dossier organisé sous `results/`.
 
 ## 📋 Prérequis
 
@@ -51,35 +48,29 @@ Cela installera:
 
 ## 📖 Utilisation
 
-### Méthode 1: Utilisation interactive
+### Méthode 1: Utilisation via la ligne de commande
 
-Exécutez simplement le script:
+Exécutez simplement le script avec l’URL cible :
 
 ```bash
-python scraper.py
+python universal_scraper.py https://example.com
 ```
 
-Le script vous demandera une URL à scraper et affichera les résultats.
+Vous pouvez omettre l’URL pour utiliser la valeur par défaut (`https://fr.osstem.com/`).
 
 ### Méthode 2: Utilisation dans votre propre script
 
-Importez la classe `WebScraper` dans votre code:
+Importez la fonction `scrape_universal` depuis `universal_scraper.py` :
 
 ```python
-from scraper import WebScraper
+from universal_scraper import scrape_universal
 
-# Créer une instance du scraper
-scraper = WebScraper("https://example.com", delay=1)
+result = scrape_universal("https://example.com", output_dir="results")
 
-# Scraper les liens d'une page
-links = scraper.scrape_links("/")
-print(links)
-
-# Sauvegarder en JSON
-scraper.save_to_json(links, 'mes_liens.json')
-
-# Sauvegarder en CSV
-scraper.save_to_csv(links, 'mes_liens.csv')
+# Accéder aux données extraites
+links = result["result"]["links"]
+tables = result["result"]["tables"]
+manifest_path = result["output"]["root"] / "manifest.json"
 ```
 
 ## 🎯 Exemples d'utilisation
@@ -87,60 +78,47 @@ scraper.save_to_csv(links, 'mes_liens.csv')
 ### Exemple 1: Scraper tous les liens d'une page
 
 ```python
-from scraper import WebScraper
+from universal_scraper import scrape_universal
 
-scraper = WebScraper("https://example.com")
-links = scraper.scrape_links("/")
-scraper.save_to_json(links, 'liens.json')
+data = scrape_universal("https://example.com")
+links = data["result"]["links"]
+print(f"{len(links)} liens trouvés")
 ```
 
 ### Exemple 2: Extraire du texte avec des sélecteurs CSS
 
 ```python
-from scraper import WebScraper
+from universal_scraper import scrape_universal
 
-scraper = WebScraper("https://example.com")
-
-# Définir ce que vous voulez extraire
-selectors = {
-    'titre': 'h1',
-    'description': '.description',
-    'prix': '.price'
-}
-
-# Scraper les données
-data = scraper.scrape_text("/page", selectors)
-print(data)
-scraper.save_to_json(data, 'donnees.json')
+data = scrape_universal("https://example.com/page")
+text = data["result"]["text"]
+print(text["page_title"])
+print(text["paragraphs"][:3])
 ```
 
 ### Exemple 3: Scraper une table HTML
 
 ```python
-from scraper import WebScraper
+from universal_scraper import scrape_universal
 
-scraper = WebScraper("https://example.com")
-table_data = scraper.scrape_table("/table-page", table_selector='table')
-scraper.save_to_csv(table_data, 'table.csv')
+data = scrape_universal("https://example.com/table-page")
+tables = data["result"]["tables"]
+print(f"{len(tables)} tables détectées")
 ```
 
 ### Exemple 4: Scraper plusieurs pages
 
 ```python
-from scraper import WebScraper
+from universal_scraper import scrape_universal
 
-scraper = WebScraper("https://example.com")
-all_data = []
+pages = [
+    "https://example.com/page1",
+    "https://example.com/page2",
+    "https://example.com/page3",
+]
 
-# Liste des pages à scraper
-pages = ["/page1", "/page2", "/page3"]
-
-for page in pages:
-    selectors = {'titre': 'h1', 'contenu': '.content'}
-    data = scraper.scrape_text(page, selectors)
-    all_data.append(data)
-
-scraper.save_to_json(all_data, 'toutes_pages.json')
+results = [scrape_universal(page)["result"]["text"] for page in pages]
+print(f"{len(results)} pages traitées")
 ```
 
 ## 🔍 Comment trouver les sélecteurs CSS?
@@ -178,24 +156,22 @@ Le script peut sauvegarder les données en deux formats:
 
 ### 📂 Organisation des fichiers
 
-**Par défaut, tous les fichiers sont sauvegardés dans le dossier `results/`**
+Chaque exécution crée un dossier dédié :
 
-Pour personnaliser le dossier de sortie :
-
-```python
-from scraper import WebScraper
-
-# Utiliser le dossier par défaut (results)
-scraper = WebScraper("https://example.com")
-
-# Utiliser un dossier personnalisé
-scraper = WebScraper("https://example.com", output_folder='mon_dossier')
-
-# Ne pas utiliser de dossier (fichiers à la racine)
-scraper = WebScraper("https://example.com", output_folder=None)
+```
+results/<domaine>/<cheminHorodaté>/
+│
+├── raw/content.json        # Réponse complète
+├── text/                   # all_text.txt, titles.json, etc.
+├── links/links.csv
+├── tables/table_*.csv
+├── images/images.csv
+├── images/files/           # Fichiers téléchargés
+├── summary.json            # Indicateurs clés
+└── manifest.json           # Récapitulatif des sorties
 ```
 
-Le dossier est créé automatiquement s'il n'existe pas.
+Utilisez le paramètre `output_dir` de `scrape_universal` pour changer l'emplacement racine.
 
 ## 🐛 Résolution de problèmes
 

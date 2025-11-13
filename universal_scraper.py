@@ -9,8 +9,11 @@ Exports per run:
         raw/content.json         -> données complètes (mode utilisé, résumé, etc.)
         text/                    -> textes séparés (all_text, titres, paragraphes, listes)
         links/links.csv          -> liens uniques
-        tables/table_X.csv       -> tables individuelles + tables_summary.csv
+        tables/table_X.csv       -> tables individuelles + tables_summary.csv + tables.json
         images/images.csv        -> métadonnées images + téléchargement dans images/files/
+        media/videos.csv         -> vidéos détectées + téléchargement dans media/videos/
+        media/audios.csv         -> audios détectés + téléchargement dans media/audios/
+        downloads/documents.csv  -> pièces jointes (PDF, etc.) téléchargées
         summary.json             -> synthèse des volumes
         manifest.json            -> récapitulatif des fichiers générés
 """
@@ -22,7 +25,7 @@ import json
 import csv
 import time
 from datetime import datetime
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 import requests
 from urllib.parse import urljoin, urlparse
@@ -60,6 +63,9 @@ HEADERS = {
     "Connection": "keep-alive",
 }
 
+DOWNLOAD_TIMEOUT = 20
+DOCUMENT_EXTENSIONS = {".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".zip", ".rar", ".csv"}
+
 
 def slugify(value: str) -> str:
     cleaned = "".join(c if c.isalnum() else "_" for c in value)
@@ -81,6 +87,10 @@ def create_run_dirs(target_url: str, base_dir: str = "results") -> Dict[str, Pat
         "tables": root / "tables",
         "images": root / "images",
         "image_files": root / "images" / "files",
+        "media": root / "media",
+        "videos": root / "media" / "videos",
+        "audios": root / "media" / "audios",
+        "downloads": root / "downloads",
     }
     for folder in folders.values():
         folder.mkdir(parents=True, exist_ok=True)
@@ -107,34 +117,54 @@ def write_text(text: str, filepath: Path):
         f.write(text)
 
 
-def download_images(images, output_folder: Path):
+def infer_filename(url: str, fallback_prefix: str, position: int, default_ext: str = "") -> str:
+    parsed = urlparse(url)
+    filename = os.path.basename(parsed.path)
+    if not filename or "." not in filename:
+        suffix = f".{default_ext.lstrip('.')}" if default_ext else ""
+        filename = f"{fallback_prefix}_{position}{suffix}"
+    return filename
+
+
+def download_assets(
+    items: List[Dict[str, str]],
+    output_folder: Path,
+    url_key: str = "src",
+    fallback_prefix: str = "asset",
+    default_ext: str = "",
+    skip_data_uri: bool = True,
+) -> Tuple[int, int, int]:
     downloaded, skipped, errors = 0, 0, 0
-    for idx, img in enumerate(images, 1):
-        src = img.get("src")
-        if not src:
+    for idx, item in enumerate(items, 1):
+        target_url = item.get(url_key)
+        if not target_url:
             skipped += 1
             continue
-        if src.startswith("data:image"):
+        if skip_data_uri and target_url.startswith("data:"):
             skipped += 1
             continue
         try:
-            parsed = urlparse(src)
-            filename = os.path.basename(parsed.path)
-            if not filename or "." not in filename:
-                filename = f"image_{idx}.jpg"
+            filename = infer_filename(target_url, fallback_prefix, idx, default_ext=default_ext)
             filepath = output_folder / filename
-            resp = requests.get(src, headers=HEADERS, timeout=10, stream=True)
+            resp = requests.get(target_url, headers=HEADERS, timeout=DOWNLOAD_TIMEOUT, stream=True)
             resp.raise_for_status()
             with open(filepath, "wb") as out:
                 for chunk in resp.iter_content(chunk_size=8192):
                     out.write(chunk)
-            img["local_path"] = str(filepath)
+            item["local_path"] = str(filepath)
             downloaded += 1
-            print(f"[IMG] {idx}/{len(images)} téléchargée -> {filepath.name}")
+            print(f"[DL] {idx}/{len(items)} -> {filepath.name}")
         except Exception as e:
-            img["error"] = str(e)
+            item["error"] = str(e)
             errors += 1
-            print(f"[IMG] erreur {src}: {e}")
+            print(f"[DL] erreur {target_url}: {e}")
+    return downloaded, skipped, errors
+
+
+def download_images(images, output_folder: Path):
+    downloaded, skipped, errors = download_assets(
+        images, output_folder, url_key="src", fallback_prefix="image", default_ext="jpg"
+    )
     print(f"[IMG] Téléchargées: {downloaded} | Ignorées: {skipped} | Erreurs: {errors}")
 
 # ----------------------------------------------------------------------
@@ -229,11 +259,56 @@ def scrape_static(base_url, path="/", session=None):
             "row_count": len(rows)
         })
 
+    # Media: videos & audio
+    videos = []
+    for video in soup.find_all("video"):
+        sources = [video.get("src")] + [s.get("src") for s in video.find_all("source")]
+        for src in sources:
+            if not src:
+                continue
+            abs_src = urljoin(base_url, src)
+            videos.append({
+                "src": abs_src,
+                "type": video.get("type") or "",
+                "width": video.get("width") or "",
+                "height": video.get("height") or "",
+                "attributes": {k: v for k, v in video.attrs.items() if k not in {"src", "width", "height", "type"}},
+            })
+
+    audios = []
+    for audio in soup.find_all("audio"):
+        sources = [audio.get("src")] + [s.get("src") for s in audio.find_all("source")]
+        for src in sources:
+            if not src:
+                continue
+            abs_src = urljoin(base_url, src)
+            audios.append({
+                "src": abs_src,
+                "type": audio.get("type") or "",
+                "attributes": {k: v for k, v in audio.attrs.items() if k not in {"src", "type"}},
+            })
+
+    documents = []
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        abs_href = urljoin(base_url, href)
+        parsed = urlparse(abs_href)
+        ext = Path(parsed.path).suffix.lower()
+        if ext in DOCUMENT_EXTENSIONS:
+            documents.append({
+                "href": abs_href,
+                "extension": ext,
+                "text": a.get_text(strip=True),
+            })
+
     summary = {
         "text_length": text_data["text_length"],
         "images_count": len(unique_images),
         "tables_count": len(tables),
         "links_count": len(unique_links),
+        "videos_count": len(videos),
+        "audios_count": len(audios),
+        "documents_count": len(documents),
         "size_bytes": len(resp.content)
     }
 
@@ -244,6 +319,11 @@ def scrape_static(base_url, path="/", session=None):
         "images": unique_images,
         "tables": tables,
         "links": unique_links,
+        "media": {
+            "videos": videos,
+            "audios": audios,
+            "documents": documents,
+        },
         "summary": summary,
         "html_preview": resp.text[:2000]
     }
@@ -374,11 +454,63 @@ class SeleniumScraper:
                 "row_count": len(rows)
             })
 
+        # Media
+        videos = []
+        video_elements = self.driver.find_elements(By.TAG_NAME, "video")
+        for video in video_elements:
+            candidates = [video.get_attribute("src")]
+            candidates.extend(
+                source.get_attribute("src") for source in video.find_elements(By.TAG_NAME, "source")
+            )
+            for src in candidates:
+                if src:
+                    src = urljoin(self.base_url, src)
+                    videos.append({
+                        "src": src,
+                        "type": video.get_attribute("type") or "",
+                        "width": video.get_attribute("width") or "",
+                        "height": video.get_attribute("height") or "",
+                        "attributes": {},
+                    })
+
+        audios = []
+        audio_elements = self.driver.find_elements(By.TAG_NAME, "audio")
+        for audio in audio_elements:
+            candidates = [audio.get_attribute("src")]
+            candidates.extend(
+                source.get_attribute("src") for source in audio.find_elements(By.TAG_NAME, "source")
+            )
+            for src in candidates:
+                if src:
+                    src = urljoin(self.base_url, src)
+                    audios.append({
+                        "src": src,
+                        "type": audio.get_attribute("type") or "",
+                        "attributes": {},
+                    })
+
+        documents = []
+        for a in self.driver.find_elements(By.TAG_NAME, "a"):
+            href = a.get_attribute("href")
+            if not href:
+                continue
+            href = urljoin(self.base_url, href)
+            ext = Path(urlparse(href).path).suffix.lower()
+            if ext in DOCUMENT_EXTENSIONS:
+                documents.append({
+                    "href": href,
+                    "extension": ext,
+                    "text": a.text.strip(),
+                })
+
         summary = {
             "text_length": text_data["text_length"],
             "images_count": len(unique_images),
             "tables_count": len(tables),
-            "links_count": len(unique_links)
+            "links_count": len(unique_links),
+            "videos_count": len(videos),
+            "audios_count": len(audios),
+            "documents_count": len(documents),
         }
 
         return {
@@ -388,6 +520,11 @@ class SeleniumScraper:
             "images": unique_images,
             "tables": tables,
             "links": unique_links,
+            "media": {
+                "videos": videos,
+                "audios": audios,
+                "documents": documents,
+            },
             "summary": summary
         }
 
@@ -435,6 +572,10 @@ def scrape_universal(url, output_dir="results", headless=True):
         finally:
             driver.close()
 
+    result.setdefault("media", {"videos": [], "audios": [], "documents": []})
+    for key in ("videos", "audios", "documents"):
+        result["media"].setdefault(key, [])
+
     save_json(result, output_dirs["raw"] / "content.json")
 
     text_data = result.get("text", {})
@@ -469,6 +610,8 @@ def scrape_universal(url, output_dir="results", headless=True):
             filename = output_dirs["tables"] / f"table_{table['table_index']}.csv"
             save_csv(table["rows"], filename)
             exports[f"table_{table['table_index']}"] = str(filename)
+        save_json(result["tables"], output_dirs["tables"] / "tables.json")
+        exports["tables_json"] = str(output_dirs["tables"] / "tables.json")
         summary_tables = [
             {
                 "table_index": table["table_index"],
@@ -485,6 +628,29 @@ def scrape_universal(url, output_dir="results", headless=True):
         exports["images_metadata"] = str(output_dirs["images"] / "images.csv")
         download_images(result["images"], output_dirs["image_files"])
         exports["images_files"] = str(output_dirs["image_files"])
+
+    media = result.get("media", {})
+
+    videos = media.get("videos", [])
+    if videos:
+        save_csv(videos, output_dirs["media"] / "videos.csv")
+        exports["videos_metadata"] = str(output_dirs["media"] / "videos.csv")
+        download_assets(videos, output_dirs["videos"], url_key="src", fallback_prefix="video", default_ext="mp4", skip_data_uri=False)
+        exports["videos_files"] = str(output_dirs["videos"])
+
+    audios = media.get("audios", [])
+    if audios:
+        save_csv(audios, output_dirs["media"] / "audios.csv")
+        exports["audios_metadata"] = str(output_dirs["media"] / "audios.csv")
+        download_assets(audios, output_dirs["audios"], url_key="src", fallback_prefix="audio", default_ext="mp3", skip_data_uri=False)
+        exports["audios_files"] = str(output_dirs["audios"])
+
+    documents = media.get("documents", [])
+    if documents:
+        save_csv(documents, output_dirs["downloads"] / "documents.csv")
+        exports["documents_metadata"] = str(output_dirs["downloads"] / "documents.csv")
+        download_assets(documents, output_dirs["downloads"], url_key="href", fallback_prefix="document", default_ext="")
+        exports["documents_files"] = str(output_dirs["downloads"])
 
     summary = result["summary"]
     summary_path = output_dirs["root"] / "summary.json"
@@ -509,6 +675,9 @@ def scrape_universal(url, output_dir="results", headless=True):
     print(f"Images: {summary['images_count']}")
     print(f"Tables: {summary['tables_count']}")
     print(f"Liens: {summary['links_count']}")
+    print(f"Vidéos: {summary.get('videos_count', 0)}")
+    print(f"Audios: {summary.get('audios_count', 0)}")
+    print(f"Documents: {summary.get('documents_count', 0)}")
     print()
     print(f"Résultats organisés dans: {output_dirs['root']}")
     print("=" * 60)

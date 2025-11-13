@@ -83,6 +83,8 @@ from universal_scraper import scrape_universal
 data = scrape_universal("https://example.com")
 links = data["result"]["links"]
 print(f"{len(links)} liens trouvés")
+tables = data["result"]["tables"]
+print(f"{len(tables)} tables détectées")
 ```
 
 ### Exemple 2: Extraire du texte avec des sélecteurs CSS
@@ -94,6 +96,8 @@ data = scrape_universal("https://example.com/page")
 text = data["result"]["text"]
 print(text["page_title"])
 print(text["paragraphs"][:3])
+videos = data["result"]["media"]["videos"]
+print(f"{len(videos)} vidéos téléchargées automatiquement")
 ```
 
 ### Exemple 3: Scraper une table HTML
@@ -164,9 +168,12 @@ results/<domaine>/<cheminHorodaté>/
 ├── raw/content.json        # Réponse complète
 ├── text/                   # all_text.txt, titles.json, etc.
 ├── links/links.csv
-├── tables/table_*.csv
+├── tables/table_*.csv      # + tables.json et tables_summary.csv
 ├── images/images.csv
 ├── images/files/           # Fichiers téléchargés
+├── media/videos.csv        # + media/videos/ pour les fichiers
+├── media/audios.csv        # + media/audios/ pour les fichiers
+├── downloads/documents.csv # + fichiers PDF/ZIP/etc.
 ├── summary.json            # Indicateurs clés
 └── manifest.json           # Récapitulatif des sorties
 ```

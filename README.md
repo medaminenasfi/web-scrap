@@ -2,17 +2,7 @@
 
 Ce guide vous explique comment utiliser le script de web scraping.
 
-## 🚀 Pour les Débutants
-
-**👉 Nouveau débutant ? Commencez ici : [GUIDE_DEBUTANT.md](GUIDE_DEBUTANT.md)**
-
-Ce guide complet vous explique :
-- Comment installer Python et les packages
-- Comment exécuter votre premier test
-- Comment résoudre les problèmes courants
-- Des exemples pas à pas
-
-### 🚀 Démarrage Rapide
+## 🚀 Démarrage Rapide
 
 1. **Installer les packages** :
    ```bash

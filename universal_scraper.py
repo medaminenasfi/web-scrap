@@ -67,11 +67,74 @@ HEADERS = {
 DOWNLOAD_TIMEOUT = 20
 DOCUMENT_EXTENSIONS = {".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".zip", ".rar", ".csv"}
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".svg", ".webp", ".bmp", ".ico", ".tiff", ".tif"}
+VIDEO_EXTENSIONS = {".mp4", ".webm", ".mov", ".mkv", ".m4v", ".avi", ".m3u8", ".ts", ".ogg"}
 
 
 def slugify(value: str) -> str:
     cleaned = "".join(c if c.isalnum() else "_" for c in value)
     return cleaned.strip("_") or "home"
+
+
+def is_unresolved_video_url(src: str, base_url: str) -> bool:
+    """Detects blob/data/about or empty/root placeholders that are not directly downloadable."""
+    if not src:
+        return True
+    if src.startswith(("blob:", "data:", "about:")):
+        return True
+    parsed = urlparse(src)
+    if parsed.scheme in {"http", "https"}:
+        path = parsed.path or ""
+        if not path.strip("/"):
+            return True
+        ext = Path(path).suffix.lower()
+        if not ext and not parsed.query:
+            return False
+        if ext and ext not in VIDEO_EXTENSIONS:
+            return False
+    return False
+
+
+def get_best_video_source(sources: List[Dict], base_url: str) -> List[Dict]:
+    """Prioritize desktop/higher quality video sources"""
+    if not sources:
+        return sources
+    
+    # Sort by priority indicators
+    def source_priority(source):
+        src = source.get("src", "").lower()
+        priority = 0
+        
+        # Prefer higher resolution indicators
+        if any(x in src for x in ["1080", "720", "hd", "high"]):
+            priority += 10
+        elif any(x in src for x in ["480", "360", "sd", "low"]):
+            priority -= 5
+            
+        # Prefer mp4 over other formats
+        if src.endswith(".mp4"):
+            priority += 5
+        elif src.endswith(".webm"):
+            priority += 3
+            
+        # Avoid mobile indicators
+        if any(x in src for x in ["mobile", "mobi", "small", "low"]):
+            priority -= 10
+            
+        # Prefer direct URLs over blob/data
+        if not src.startswith(("blob:", "data:")):
+            priority += 20
+            
+        return priority
+    
+    # Sort sources by priority (highest first)
+    sorted_sources = sorted(sources, key=source_priority, reverse=True)
+    
+    # Return all sources in priority order
+    return sorted_sources
+
+
+def videos_unresolved(videos: List[Dict[str, str]], base_url: str) -> bool:
+    return bool(videos) and all(is_unresolved_video_url(v.get("src", ""), base_url) for v in videos)
 
 
 def create_run_dirs(target_url: str, base_dir: str = "results") -> Dict[str, Path]:
@@ -151,6 +214,10 @@ def download_assets(
             skipped += 1
             continue
         if skip_data_uri and target_url.startswith("data:"):
+            skipped += 1
+            continue
+        if target_url.startswith("blob:") or target_url.startswith("about:blank"):
+            item["skip_reason"] = "unsupported_scheme"
             skipped += 1
             continue
         try:
@@ -737,6 +804,17 @@ class SeleniumScraper:
         chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
         chrome_options.add_experimental_option("useAutomationExtension", False)
         chrome_options.add_argument(f"user-agent={USER_AGENT}")
+        # Force desktop viewport and disable mobile optimizations
+        chrome_options.add_argument("--window-size=1920,1080")
+        chrome_options.add_argument("--force-device-scale-factor=1")
+        chrome_options.add_argument("--disable-mobile-viewport")
+        chrome_options.add_argument("--disable-touch-events")
+        chrome_options.add_argument("--disable-smooth-scrolling")
+        # Enable performance logging to capture network requests
+        try:
+            chrome_options.set_capability('goog:loggingPrefs', {'performance': 'ALL'})
+        except Exception:
+            pass
 
         service = Service(ChromeDriverManager().install())
         self.driver = webdriver.Chrome(service=service, options=chrome_options)
@@ -749,9 +827,28 @@ class SeleniumScraper:
         WebDriverWait(self.driver, wait_time).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
         time.sleep(self.delay)
         
-        # Attendre le chargement complet
+        # Wait for page load and force desktop rendering
         try:
-            # Scroll pour déclencher lazy-loading
+            # Set desktop viewport before content loads
+            self.driver.execute_script("""
+                Object.defineProperty(navigator, 'userAgent', {
+                    get: function() { return 'arguments[0]'; }
+                });
+                // Force desktop viewport
+                var meta = document.querySelector('meta[name="viewport"]');
+                if (meta) meta.remove();
+                // Set desktop screen size
+                Object.defineProperty(screen, 'width', {get: function(){ return 1920; }});
+                Object.defineProperty(screen, 'height', {get: function(){ return 1080; }});
+                Object.defineProperty(window, 'innerWidth', {get: function(){ return 1920; }});
+                Object.defineProperty(window, 'innerHeight', {get: function(){ return 1080; }});
+            """, USER_AGENT)
+        except Exception:
+            pass
+        
+        # Scroll for lazy loading with desktop behavior
+        try:
+            # Scroll for desktop-style lazy loading
             self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
             time.sleep(2)
             self.driver.execute_script("window.scrollTo(0, 0);")
@@ -1000,22 +1097,77 @@ class SeleniumScraper:
 
         # Media
         videos = []
+        seen_video_src = set()
         video_elements = self.driver.find_elements(By.TAG_NAME, "video")
         for video in video_elements:
             candidates = [video.get_attribute("src")]
             candidates.extend(
                 source.get_attribute("src") for source in video.find_elements(By.TAG_NAME, "source")
             )
+            # Try currentSrc resolved by the browser
+            try:
+                current_src = self.driver.execute_script("return arguments[0].currentSrc || '';", video)
+                if current_src:
+                    candidates.append(current_src)
+            except Exception:
+                pass
             for src in candidates:
                 if src:
                     src = urljoin(self.base_url, src)
+                    if is_unresolved_video_url(src, self.base_url):
+                        continue
+                    if src in seen_video_src:
+                        continue
+                    seen_video_src.add(src)
                     videos.append({
                         "src": src,
                         "type": video.get_attribute("type") or "",
                         "width": video.get_attribute("width") or "",
                         "height": video.get_attribute("height") or "",
-                        "attributes": {},
+                        "attributes": {"source": "dom", "quality": "auto"},
                     })
+
+        # Augment videos with network-captured media URLs
+        try:
+            perf_logs = self.driver.get_log('performance')
+            for entry in perf_logs:
+                try:
+                    msg = json.loads(entry.get('message'))
+                    inner = msg.get('message', {})
+                    method = inner.get('method')
+                    params = inner.get('params', {})
+                    if method == 'Network.responseReceived':
+                        response = params.get('response', {})
+                        url = response.get('url')
+                        mime = response.get('mimeType', '')
+                        if not url:
+                            continue
+                        if url.startswith('data:') or url.startswith('blob:'):
+                            continue
+                        url_lower = url.lower()
+                        ext = Path(urlparse(url).path).suffix.lower()
+                        is_video_mime = mime.startswith('video/') or 'mpegurl' in mime or 'application/vnd.apple.mpegurl' in mime
+                        is_video_ext = (ext in VIDEO_EXTENSIONS) or ('.m3u8' in url_lower) or ('.mp4' in url_lower) or ('.webm' in url_lower)
+                        if is_video_mime or is_video_ext:
+                            abs_url = urljoin(self.base_url, url)
+                            if abs_url in seen_video_src:
+                                continue
+                            seen_video_src.add(abs_url)
+                            videos.append({
+                                "src": abs_url,
+                                "type": mime or "",
+                                "width": "",
+                                "height": "",
+                                "attributes": {"source": "network", "quality": "auto"},
+                            })
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+        # Apply video quality prioritization
+        videos = get_best_video_source(videos, self.base_url)
+        print(f"[VIDEOS] {len(videos)} prioritized video sources found")
 
         audios = []
         audio_elements = self.driver.find_elements(By.TAG_NAME, "audio")
@@ -1345,31 +1497,36 @@ def scrape_universal(url, output_dir="results", headless=True):
     output_dirs = create_run_dirs(url, output_dir)
     session = requests.Session()
 
+    def run_selenium():
+        driver = SeleniumScraper(base_url, headless=headless)
+        try:
+            return driver.extract_all(path)
+        finally:
+            driver.close()
+
     try:
         static_data = scrape_static(base_url, path, session=session)
+        unresolved_static_videos = videos_unresolved(static_data.get("media", {}).get("videos", []), base_url)
+
         if static_data["summary"]["text_length"] > 800 or static_data["summary"]["links_count"] > 10:
-            print("[UNIVERSAL] Contenu riche détecté en mode statique, pas de Selenium nécessaire.")
-            result = static_data
+            if unresolved_static_videos and SELENIUM_AVAILABLE:
+                print("[UNIVERSAL] Vidéos non résolues en statique, tentative Selenium.")
+                result = run_selenium()
+            else:
+                print("[UNIVERSAL] Contenu riche détecté en mode statique, pas de Selenium nécessaire.")
+                result = static_data
         else:
             if not SELENIUM_AVAILABLE:
                 print("[UNIVERSAL] Selenium indisponible, conservation des données statiques.")
                 result = static_data
             else:
                 print("[UNIVERSAL] Contenu léger détecté, tentative avec Selenium pour contenu dynamique.")
-                driver = SeleniumScraper(base_url, headless=headless)
-                try:
-                    result = driver.extract_all(path)
-                finally:
-                    driver.close()
+                result = run_selenium()
     except Exception:
         if not SELENIUM_AVAILABLE:
             raise
         print("[UNIVERSAL] Échec du mode statique, bascule vers Selenium.")
-        driver = SeleniumScraper(base_url, headless=headless)
-        try:
-            result = driver.extract_all(path)
-        finally:
-            driver.close()
+        result = run_selenium()
 
     result.setdefault("media", {"videos": [], "audios": [], "documents": []})
     for key in ("videos", "audios", "documents"):
